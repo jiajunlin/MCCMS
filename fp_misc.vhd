@@ -59,7 +59,9 @@ begin
                             variable ex : out unsigned(11 downto 0);
                             variable fr : out unsigned(51 downto 0);
                             variable mg : out unsigned(62 downto 0);
-                            variable is_z, is_i, is_n, is_sn : out boolean) is
+                            variable is_z, is_i : out boolean;
+                            variable is_n : inout boolean;
+                            variable is_sn : out boolean) is
             variable e : unsigned(11 downto 0);
             variable f : unsigned(51 downto 0);
             variable emax : boolean;

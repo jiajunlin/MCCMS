@@ -124,6 +124,7 @@ architecture structural of fpu is
     signal is_ds     : std_logic;                        -- fdiv (00011) or fsqrt (01011)
     signal fma_fp    : std_logic_vector(63 downto 0);
     signal fma_flags : std_logic_vector(4 downto 0);
+    signal start_ds  : std_logic; -- gated start pulse for the div/sqrt unit
 
 begin
 
@@ -157,8 +158,10 @@ begin
     -- (not is_fma): for an FMA op funct5 carries rs3 and may collide with the div/sqrt encodings.
     is_ds <= '1' when ((funct5 = "00011" or funct5 = "01011") and is_fma = '0') else '0';
 
+    start_ds <= start and is_ds;
+
     DIVSQRT_INST: fp_divsqrt
-        port map(clk => clk, reset => reset, start => (start and is_ds),
+        port map(clk => clk, reset => reset, start => start_ds,
                  is_sqrt => funct5(3),  -- 00011 fdiv -> 0, 01011 fsqrt -> 1
                  is_double => is_double, rm => rm, a_raw => a_raw, b_raw => b_raw,
                  fp_result => ds_fp, flags => ds_flags, done => ds_done);
