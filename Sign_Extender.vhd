@@ -16,12 +16,12 @@ begin
     process(opcode, Instr)
     begin
         case opcode is
-            -- I-type: Loads (lw) and Immediate Alu (addi, andi, ori)
-            when "0000011" | "0010011" =>
+            -- I-type: Loads (lb/lh/lw/lbu/lhu), Immediate Alu (addi, ...), JALR, and FP loads (flw/fld)
+            when "0000011" | "0010011" | "1100111" | "0000111" =>
                 Imm_Out <= (31 downto 12 => Instr(31)) & Instr(31 downto 20);
 
-            -- S-type: Stores (sw)
-            when "0100011" =>
+            -- S-type: Stores (sw) and FP stores (fsw/fsd)
+            when "0100011" | "0100111" =>
                 Imm_Out <= (31 downto 12 => Instr(31)) & Instr(31 downto 25) & Instr(11 downto 7);
 
             -- B-type: Branches (beq, bne)
@@ -33,6 +33,10 @@ begin
             -- below bit 12 since the field itself already spans the top 20 bits)
             when "0110111" | "0010111" =>
                 Imm_Out <= Instr(31 downto 12) & x"000";
+
+            -- J-type: JAL. imm = {instr[31], instr[19:12], instr[20], instr[30:21], 0}, sign-extended
+            when "1101111" =>
+                Imm_Out <= (31 downto 20 => Instr(31)) & Instr(19 downto 12) & Instr(20) & Instr(30 downto 21) & '0';
 
             -- Default fallback
             when others =>

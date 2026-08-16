@@ -18,10 +18,11 @@ architecture sim of riscv_cpu_tb is
             inst_addr     : out std_logic_vector(31 downto 0);
             instruction   : in  std_logic_vector(31 downto 0);
             dmem_addr     : out std_logic_vector(31 downto 0);
-            dmem_wdata    : out std_logic_vector(31 downto 0);
-            dmem_rdata    : in  std_logic_vector(31 downto 0);
+            dmem_wdata    : out std_logic_vector(63 downto 0);
+            dmem_rdata    : in  std_logic_vector(63 downto 0);
             dmem_re       : out std_logic;
-            dmem_we       : out std_logic
+            dmem_we       : out std_logic;
+            dmem_be       : out std_logic_vector(7 downto 0)
         );
     end component;
 
@@ -36,27 +37,34 @@ architecture sim of riscv_cpu_tb is
     signal instruction_tb : std_logic_vector(31 downto 0);
     
     signal dmem_addr_tb   : std_logic_vector(31 downto 0);
-    signal dmem_wdata_tb  : std_logic_vector(31 downto 0);
-    signal dmem_rdata_tb  : std_logic_vector(31 downto 0);
+    signal dmem_wdata_tb  : std_logic_vector(63 downto 0);
+    signal dmem_rdata_tb  : std_logic_vector(63 downto 0);
     signal dmem_re_tb     : std_logic;
     signal dmem_we_tb     : std_logic;
+    signal dmem_be_tb     : std_logic_vector(7 downto 0);
 
     -- Local Simulation Dual-Port Shared RAM (256 Words)
     type ram_array is array (0 to 255) of std_logic_vector(31 downto 0);
+    -- Exercises loads/stores of every width plus JAL/JALR. Data lives at word index 64+
+    -- (byte addr 256+) so stores never clobber the instruction region.
     signal shared_sys_ram : ram_array := (
-        0  => x"01400093", -- addi x1, x0, 20      
-        1  => x"00a00113", -- addi x2, x0, 10      
-        2  => x"002081b3", -- add  x3, x1, x2      
-        3  => x"40208233", -- sub  x4, x1, x2      
-        4  => x"0020f2b3", -- and  x5, x1, x2      
-        5  => x"0020e333", -- or   x6, x1, x2      
-        6  => x"0020a123", -- sw   x2, 2(x1)       -- Target Address calculation: 20 + 2 = 22
-        7  => x"0040a383", -- lw   x7, 4(x1)       -- Target Address calculation: 20 + 4 = 24
-        8  => x"0020a463", -- beq  x1, x2, 8       
-        9  => x"00209463", -- bne  x1, x2, 8       
-        10 => x"00000013", -- nop                  
-        11 => x"00112433", -- slt  x8, x2, x1      
-        others => x"00000013" -- Default Balance to NOPs
+        0  => x"10000093", -- addi x1,x0,256   x1 = 0x100 (data base)
+        1  => x"fff00113", -- addi x2,x0,-1    x2 = 0xFFFFFFFF
+        2  => x"00208023", -- sb   x2,0(x1)    mem[0x100] byte0 = 0xFF
+        3  => x"0000c183", -- lbu  x3,0(x1)    x3 = 0x000000FF
+        4  => x"00008203", -- lb   x4,0(x1)    x4 = 0xFFFFFFFF (sign-extended)
+        5  => x"00209223", -- sh   x2,4(x1)    mem[0x104] half = 0xFFFF
+        6  => x"0040d303", -- lhu  x6,4(x1)    x6 = 0x0000FFFF
+        7  => x"00409383", -- lh   x7,4(x1)    x7 = 0xFFFFFFFF (sign-extended)
+        8  => x"0010a423", -- sw   x1,8(x1)    mem[0x108] = 0x100
+        9  => x"0080a403", -- lw   x8,8(x1)    x8 = 0x00000100
+        10 => x"008004ef", -- jal  x9,8        x9 = 44; jump to idx12 (skips idx11)
+        11 => x"06f00513", -- addi x10,x0,111  SKIPPED -> x10 stays 0
+        12 => x"0de00593", -- addi x11,x0,222  x11 = 222
+        13 => x"05000693", -- addi x13,x0,80   x13 = 80 (= byte addr of idx20)
+        14 => x"00068667", -- jalr x12,x13,0   x12 = 60; jump to idx20 (skips idx15-19)
+        15 => x"07b00713", -- addi x14,x0,123  SKIPPED -> x14 stays 0
+        others => x"00000013" -- NOP (addi x0,x0,0)
     );
 
 begin
@@ -73,7 +81,8 @@ begin
             dmem_wdata    => dmem_wdata_tb,
             dmem_rdata    => dmem_rdata_tb,
             dmem_re       => dmem_re_tb,
-            dmem_we       => dmem_we_tb
+            dmem_we       => dmem_we_tb,
+            dmem_be       => dmem_be_tb
         );
 
     -- Port 1: Async Read Interface for Instruction Fetch Tracking
@@ -88,24 +97,39 @@ begin
         end if;
     end process;
 
-    -- Port 2: Synchronous Data Access Read/Write Memory tracking
+    -- Port 2a: Asynchronous data read. The 64-bit bus presents the addressed 8-byte doubleword
+    -- as two consecutive 32-bit words: low lane = word[base], high lane = word[base+1].
+    process(dmem_addr_tb, dmem_re_tb, shared_sys_ram)
+        variable base : integer;
+    begin
+        base := to_integer(unsigned(dmem_addr_tb(11 downto 3))) * 2; -- doubleword-aligned word index
+        if dmem_re_tb = '1' and base >= 0 and base <= 254 then
+            dmem_rdata_tb(31 downto 0)  <= shared_sys_ram(base);
+            dmem_rdata_tb(63 downto 32) <= shared_sys_ram(base + 1);
+        else
+            dmem_rdata_tb <= (others => '0');
+        end if;
+    end process;
+
+    -- Port 2b: Synchronous data write with per-byte strobes (sb/sh/sw/fsw/fsd). be(3:0) hit the
+    -- low-lane word, be(7:4) the high-lane word.
     process(clk_tb)
-        variable data_idx : integer;
+        variable base : integer;
     begin
         if rising_edge(clk_tb) then
-            if reset_tb = '0' then
-                data_idx := to_integer(unsigned(dmem_addr_tb(9 downto 2)));
-                if data_idx >= 0 and data_idx <= 255 then
-                    -- Process Synchronous Write
-                    if dmem_we_tb = '1' then
-                        shared_sys_ram(data_idx) <= dmem_wdata_tb;
-                    end if;
-                    -- Process Read response latching
-                    if dmem_re_tb = '1' then
-                        dmem_rdata_tb <= shared_sys_ram(data_idx);
-                    else
-                        dmem_rdata_tb <= (others => '0');
-                    end if;
+            if reset_tb = '0' and dmem_we_tb = '1' then
+                base := to_integer(unsigned(dmem_addr_tb(11 downto 3))) * 2;
+                if base >= 0 and base <= 254 then
+                    for bsel in 0 to 3 loop
+                        if dmem_be_tb(bsel) = '1' then
+                            shared_sys_ram(base)(bsel*8 + 7 downto bsel*8) <=
+                                dmem_wdata_tb(bsel*8 + 7 downto bsel*8);
+                        end if;
+                        if dmem_be_tb(bsel + 4) = '1' then
+                            shared_sys_ram(base + 1)(bsel*8 + 7 downto bsel*8) <=
+                                dmem_wdata_tb(bsel*8 + 39 downto bsel*8 + 32);
+                        end if;
+                    end loop;
                 end if;
             end if;
         end if;
@@ -131,7 +155,7 @@ begin
         reset_tb <= '0';
         
         -- Run long enough to completely observe pipeline step saturation
-        wait for CLK_PERIOD * 30;
+        wait for CLK_PERIOD * 40;
         
         assert false report "Refactored Core System successfully simulated!" severity failure;
         wait;
